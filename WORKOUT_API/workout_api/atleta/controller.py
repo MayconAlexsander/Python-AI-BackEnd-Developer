@@ -10,6 +10,10 @@ from workout_api.centro_treinamento.models import CentroTreinamentoModel
 
 from workout_api.contrib.dependencies import DatabaseDependency
 from sqlalchemy.future import select
+from sqlalchemy.exc import IntegrityError
+
+from fastapi_pagination.ext.sqlalchemy import paginate as sqlalchemy_paginate
+from fastapi_pagination import Page, add_pagination, paginate, LimitOffsetPage
 
 router = APIRouter()
 
@@ -23,6 +27,19 @@ async def post(
     db_session: DatabaseDependency, 
     atleta_in: AtletaIn = Body(...)
 ):
+    
+    atleta_already_exists = (
+        await db_session.execute(
+            select(AtletaModel).filter_by(cpf = atleta_in.cpf)
+        )
+    ).scalars().first()
+
+    if atleta_already_exists:
+        raise HTTPException(
+            status_code = status.HTTP_303_SEE_OTHER, 
+            detail = f"Já existe um atleta cadastrado com o cpf: {atleta_in.cpf}"
+        )
+
     categoria_nome = atleta_in.categoria.nome
     centro_treinamento_nome = atleta_in.centro_treinamento.nome
 
@@ -54,10 +71,14 @@ async def post(
         
         db_session.add(atleta_model)
         await db_session.commit()
-    except Exception:
+
+    except IntegrityError as itgErr:
+        db_session.rollback()
+        cpf = atleta_out.cpf
+
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail='Ocorreu um erro ao inserir os dados no banco'
+            status_code=status.HTTP_303_SEE_OTHER, 
+            detail=f'Já existe um atleta cadastrado com o cpf: {cpf}'
         )
 
     return atleta_out
@@ -67,13 +88,12 @@ async def post(
     '/', 
     summary='Consultar todos os Atletas',
     status_code=status.HTTP_200_OK,
-    response_model=list[AtletaOut],
+    response_model=LimitOffsetPage[AtletaOut],
 )
-async def query(db_session: DatabaseDependency) -> list[AtletaOut]:
+async def query(db_session: DatabaseDependency) -> LimitOffsetPage[AtletaOut]:
     atletas: list[AtletaOut] = (await db_session.execute(select(AtletaModel))).scalars().all()
-    
-    return [AtletaOut.model_validate(atleta) for atleta in atletas]
-
+    atletas_out = [AtletaOut.model_validate(atleta) for atleta in atletas]
+    return paginate(atletas_out)
 
 @router.get(
     '/{id}', 
@@ -81,7 +101,7 @@ async def query(db_session: DatabaseDependency) -> list[AtletaOut]:
     status_code=status.HTTP_200_OK,
     response_model=AtletaOut,
 )
-async def get(id: UUID4, db_session: DatabaseDependency) -> AtletaOut:
+async def get(id: UUID4, nome: str, cpf: str, db_session: DatabaseDependency) -> AtletaOut:
     atleta: AtletaOut = (
         await db_session.execute(select(AtletaModel).filter_by(id=id))
     ).scalars().first()
